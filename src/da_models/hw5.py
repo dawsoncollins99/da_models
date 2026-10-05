@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ... import lorenz63, lorenz96, sturis
+from . import lorenz63, lorenz96, sturis
 from .assimilation import make_propagator, observe, selection_operator, simulate_truth
 from .climatology import load_climatology, long_run
 
