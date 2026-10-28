@@ -1,15 +1,17 @@
-"""Analytic state Jacobians Df(x) for the HW 5 models.
+"""Analytic state Jacobians Df(x) for the HW 5 and HW 8 models.
 
 Each function has the signature jac(state, **params) with the same keyword
 parameters (and defaults) as the matching rhs, so it plugs directly into the
-`jac_func` hook of adjoint.adjoint_solve:
+`jac_func` hook of adjoint.adjoint_solve and into ekf.make_flow_jacobian:
 
-    lorenz63_jacobian  <->  lorenz63.rhs
-    lorenz96_jacobian  <->  lorenz96.rhs          (one-layer model)
-    sturis_jacobian    <->  sturis.rhs
+    lorenz63_jacobian           <->  lorenz63.rhs
+    lorenz96_jacobian           <->  lorenz96.rhs            (one-layer model)
+    sturis_jacobian             <->  sturis.rhs
+    lorenz96_two_layer_jacobian <->  lorenz96.rhs_two_layer  (HW 8)
 
-Entry [i, j] of each Jacobian is d f_i / d x_j. All three agree with central
-finite differences to ~1e-10 (see the checks in hw5_problem5.ipynb).
+Entry [i, j] of each Jacobian is d f_i / d x_j. All agree with central
+finite differences to ~1e-10 (see the checks in hw5_problem5.ipynb and
+hw8_problem2.ipynb).
 """
 
 import numpy as np
@@ -103,5 +105,41 @@ def sturis_jacobian(state,
     return Jx
 
 
+def lorenz96_two_layer_jacobian(state, K=40, J=5, F=8.0, d=1.0, gamma=0.05,
+                                d_j=(0.2, 0.5, 1.0, 2.0, 5.0)):
+    """Analytic Jacobian of the two-layer model (HW 8), matches rhs_two_layer.
+
+    State order (lorenz96.pack_two_layer): u_0..u_{K-1}, then v_{k,j} at
+    index K + k*J + j (j = 0..J-1 here). With the same gamma for every j,
+
+        du_k/dt     = u_{k-1}(u_{k+1} - u_{k-2}) + gamma sum_j v_{k,j} u_k - d u_k + F
+        dv_{k,j}/dt = -d_j v_{k,j} - gamma u_k^2
+
+    so the nonzero blocks are
+        d(du_k)/d(u)       = one-layer Jacobian row k, plus gamma sum_j v_{k,j}
+                             on the diagonal
+        d(du_k)/d(v_{k,j}) = gamma u_k
+        d(dv_{k,j})/d(u_k) = -2 gamma u_k
+        d(dv_{k,j})/d(v_{k,j}) = -d_j
+    Each v_{k,j} couples only to its own site u_k.
+    """
+    state = np.asarray(state)
+    u = state[:K]
+    v = state[K:].reshape(K, J)
+    d_j = np.asarray(d_j)
+    n = K * (1 + J)
+
+    Jx = np.zeros((n, n))
+    Jx[:K, :K] = lorenz96_jacobian(u, F=F, d=d) + np.diag(gamma * v.sum(axis=1))
+    k = np.repeat(np.arange(K), J)          # site of each v, in state order
+    j = np.tile(np.arange(J), K)            # family of each v
+    iv = K + k * J + j                      # state index of v_{k,j}
+    Jx[k, iv] = gamma * u[k]
+    Jx[iv, k] = -2.0 * gamma * u[k]
+    Jx[iv, iv] = -d_j[j]
+    return Jx
+
+
 JACOBIANS.update(lorenz63=lorenz63_jacobian, lorenz96=lorenz96_jacobian,
-                 sturis=sturis_jacobian)
+                 sturis=sturis_jacobian,
+                 lorenz96_two_layer=lorenz96_two_layer_jacobian)

@@ -29,9 +29,10 @@ from pathlib import Path
 
 import numpy as np
 
-from . import lorenz96
+from . import jacobians, lorenz96
 from .assimilation import make_propagator, selection_operator, simulate_truth
 from .climatology import load_climatology
+from .ekf import make_flow_jacobian
 from .kalman import synthetic_observations
 
 # ---------------------------------------------------------------------------
@@ -51,6 +52,7 @@ MODELS = {
     "l96": dict(
         title="One-layer Lorenz-96",
         rhs=lorenz96.rhs,
+        jac=jacobians.lorenz96_jacobian,
         params=dict(F=8.0, d=1.0),
         K=40, J=0,
         ic_file="lorenz96_ic.npy",
@@ -59,6 +61,7 @@ MODELS = {
     "l96_2layer": dict(
         title="Two-layer Lorenz-96 (K = 10, J = 2)",
         rhs=lorenz96.rhs_two_layer,
+        jac=jacobians.lorenz96_two_layer_jacobian,
         params=dict(K=10, J=2, F=8.0, d=1.0, gamma=0.05, d_j=(0.2, 0.5)),
         K=10, J=2,
         ic_file="lorenz96_two_layer_K10_J2_ic.npy",
@@ -88,6 +91,11 @@ def rng_init(name, Ne, r):
 def rng_pert(name, Ne, r):
     """EnKF observation perturbations for ensemble size Ne, replicate r."""
     return np.random.default_rng([SEED, 2, _model_index(name), Ne, r])
+
+
+def rng_direction(name):
+    """Direction q for the Problem 2(a) Jacobian check."""
+    return np.random.default_rng([SEED, 3, _model_index(name)])
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +155,24 @@ def prior(x0, D):
     return m0, P0
 
 
+def scaled_rmse_spread(means, truth, D, covs=None):
+    """Scaled diagnostics at each time (Problem 4 definitions):
+
+        RMSE_k   = sqrt( |D^{-1}(m_k - x_k)|^2 / n )
+        Spread_k = sqrt( tr(D^{-1} P_k D^{-T}) / n ) = sqrt( sum_i P_k,ii / D_i^2 / n )
+
+    means and truth have shape (T, n), covs (T, n, n). Returns (rmse, spread);
+    spread is None when covs is None (the free forecast has no spread).
+    """
+    n = truth.shape[1]
+    rmse = np.sqrt(np.sum(((means - truth) / D) ** 2, axis=1) / n)
+    if covs is None:
+        return rmse, None
+    var = np.diagonal(covs, axis1=1, axis2=2)
+    spread = np.sqrt(np.sum(var / D ** 2, axis=1) / n)
+    return rmse, spread
+
+
 # ---------------------------------------------------------------------------
 # Model setup
 # ---------------------------------------------------------------------------
@@ -154,9 +180,11 @@ def prior(x0, D):
 def load_model(name, data_dir):
     """Everything about one experiment except the random data.
 
-    Returns a dict with rhs, params, x0 (spun-up true initial state), the
-    climatology (mu, B), D, the prior (m0, P0), H, R, labels, and a
-    propagator M over one observation window (sampled at N_SUB sub-steps).
+    Returns a dict with rhs, jac (analytic Df), params, x0 (spun-up true
+    initial state), the climatology (mu, B), D, the prior (m0, P0), H, R,
+    labels, a propagator for the model map over one observation window
+    (sampled at N_SUB sub-steps), and flow_jacobian, its Jacobian from the
+    variational equations (same solver settings).
     """
     spec = MODELS[name]
     data_dir = Path(data_dir)
@@ -174,7 +202,10 @@ def load_model(name, data_dir):
     R = np.eye(len(observed))
     propagate = make_propagator(rhs, params, DT_OBS, N_SUB,
                                 rtol=SOLVER["rtol"], atol=SOLVER["atol"])
-    return dict(name=name, title=spec["title"], rhs=rhs, params=params,
+    flow_jacobian = make_flow_jacobian(rhs, spec["jac"], params, DT_OBS, N_SUB,
+                                       **SOLVER)
+    return dict(name=name, title=spec["title"], rhs=rhs, jac=spec["jac"],
+                flow_jacobian=flow_jacobian, params=params,
                 n=n, K=spec["K"], J=spec["J"], x0=x0, mu=clim["mu"],
                 B=clim["B"], D=D, m0=m0, P0=P0, observed=observed, H=H, R=R,
                 labels=state_labels(name), propagate=propagate)
