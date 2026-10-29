@@ -155,6 +155,11 @@ def run_enkf(propagate, E0, Y, H, R, rng):
         seg_mean, seg_std (N, n_sub+1, n)         ensemble mean / std inside
                                                   each forecast window
         wall_time         seconds for all forecasts + analyses
+        failed_at         None, or the step k at which the run stopped
+                          (solver failure or a non-finite member)
+        message           reason for a failure ("" if none)
+    After a failure every remaining entry is NaN: nothing is clipped, and the
+    run is reported as failed rather than dropped.
     """
     H = np.atleast_2d(np.asarray(H, dtype=float))
     R = np.atleast_2d(np.asarray(R, dtype=float))
@@ -163,37 +168,62 @@ def run_enkf(propagate, E0, Y, H, R, rng):
     N, m = Y.shape
     n, Ne = E0.shape
 
-    E_a = np.empty((N + 1, n, Ne));  E_f = np.empty((N + 1, n, Ne))
-    mean_a = np.empty((N + 1, n));   cov_a = np.empty((N + 1, n, n))
-    mean_f = np.empty((N + 1, n));   cov_f = np.empty((N + 1, n, n))
-    K = np.full((N, n, m), np.nan)
-    innov = np.full((N, m), np.nan)
-    innov_members = np.full((N, m, Ne), np.nan)
-    seg_mean, seg_std = [], []
+    nan = np.nan
+    E_a = np.full((N + 1, n, Ne), nan);  E_f = np.full((N + 1, n, Ne), nan)
+    mean_a = np.full((N + 1, n), nan);   cov_a = np.full((N + 1, n, n), nan)
+    mean_f = np.full((N + 1, n), nan);   cov_f = np.full((N + 1, n, n), nan)
+    K = np.full((N, n, m), nan)
+    innov = np.full((N, m), nan)
+    innov_members = np.full((N, m, Ne), nan)
+    seg_mean = seg_std = None
+    failed_at, message = None, ""
 
     E_a[0] = E_f[0] = E0
     mean_a[0], cov_a[0] = ensemble_mean_cov(E0)
     mean_f[0], cov_f[0] = mean_a[0], cov_a[0]
+    if not np.all(np.isfinite(E0)):
+        failed_at, message = 0, "non-finite initial member"
 
     tic = time.perf_counter()
     for k in range(1, N + 1):
-        segments, E_f[k] = enkf_forecast(E_a[k - 1], propagate)
-        seg_mean.append(segments.mean(axis=2))
-        seg_std.append(segments.std(axis=2, ddof=1))
+        if failed_at is not None:
+            break
+        try:
+            segments, Ef = enkf_forecast(E_a[k - 1], propagate)
+        except RuntimeError as err:
+            failed_at, message = k, str(err)
+            break
+        if seg_mean is None:
+            seg_mean = np.full((N,) + segments.shape[:2], nan)
+            seg_std = np.full((N,) + segments.shape[:2], nan)
+        if not np.all(np.isfinite(Ef)):
+            failed_at, message = k, "non-finite forecast member"
+            break
+        E_f[k] = Ef
+        seg_mean[k - 1] = segments.mean(axis=2)
+        seg_std[k - 1] = segments.std(axis=2, ddof=1)
         y = Y[k - 1]
         if np.all(np.isnan(y)):
             E_a[k] = E_f[k]
             mean_f[k], cov_f[k] = ensemble_mean_cov(E_f[k])
         else:
-            E_a[k], info = enkf_analysis(E_f[k], y, H, R, rng)
+            Ea, info = enkf_analysis(E_f[k], y, H, R, rng)
+            if not np.all(np.isfinite(Ea)):
+                failed_at, message = k, "non-finite analysis member"
+                break
+            E_a[k] = Ea
             mean_f[k], cov_f[k] = info["mean_f"], info["P_f"]
             K[k - 1], innov[k - 1] = info["K"], info["innovation_mean"]
             innov_members[k - 1] = info["innovations"]
         mean_a[k], cov_a[k] = ensemble_mean_cov(E_a[k])
     wall_time = time.perf_counter() - tic
 
+    if seg_mean is None:                       # failed before the first forecast
+        n_pts = getattr(propagate, "n_sub", 0) + 1
+        seg_mean = np.full((N, n_pts, n), nan)
+        seg_std = np.full((N, n_pts, n), nan)
+
     return dict(mean_a=mean_a, cov_a=cov_a, mean_f=mean_f, cov_f=cov_f,
                 E_a=E_a, E_f=E_f, K=K, innovation_mean=innov,
-                innovations=innov_members,
-                seg_mean=np.array(seg_mean), seg_std=np.array(seg_std),
-                wall_time=wall_time)
+                innovations=innov_members, seg_mean=seg_mean, seg_std=seg_std,
+                wall_time=wall_time, failed_at=failed_at, message=message)

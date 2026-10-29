@@ -33,6 +33,7 @@ from . import jacobians, lorenz96
 from .assimilation import make_propagator, selection_operator, simulate_truth
 from .climatology import load_climatology
 from .ekf import make_flow_jacobian
+from .enkf import make_ensemble_propagator
 from .kalman import synthetic_observations
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,8 @@ SOLVER = dict(method="RK45", rtol=1e-9, atol=1e-9)   # HW 1 solve_ivp settings
 SEED = 513
 PRIOR_SHIFT = 0.1             # m_0^a = x_0^dagger + 0.1 D 1
 PRIOR_VAR = 0.01              # P_0^a = 0.01 D^2
+ENSEMBLE_SIZES = (50, 200)    # Problem 3
+REPLICATES = (0, 1, 2)        # three independent (initial-ensemble, perturbation) seed pairs
 
 MODELS = {
     "l96": dict(
@@ -183,8 +186,10 @@ def load_model(name, data_dir):
     Returns a dict with rhs, jac (analytic Df), params, x0 (spun-up true
     initial state), the climatology (mu, B), D, the prior (m0, P0), H, R,
     labels, a propagator for the model map over one observation window
-    (sampled at N_SUB sub-steps), and flow_jacobian, its Jacobian from the
-    variational equations (same solver settings).
+    (sampled at N_SUB sub-steps), flow_jacobian (its Jacobian from the
+    variational equations), and two ensemble propagators with the same
+    solver settings: propagate_ens (all members in one stacked solve_ivp
+    call) and propagate_ens_loop (one solve_ivp call per member).
     """
     spec = MODELS[name]
     data_dir = Path(data_dir)
@@ -204,8 +209,13 @@ def load_model(name, data_dir):
                                 rtol=SOLVER["rtol"], atol=SOLVER["atol"])
     flow_jacobian = make_flow_jacobian(rhs, spec["jac"], params, DT_OBS, N_SUB,
                                        **SOLVER)
+    tol = dict(rtol=SOLVER["rtol"], atol=SOLVER["atol"])
+    propagate_ens = make_ensemble_propagator(rhs, params, DT_OBS, N_SUB, **tol)
+    propagate_ens_loop = make_ensemble_propagator(rhs, params, DT_OBS, N_SUB,
+                                                  vectorized=False, **tol)
     return dict(name=name, title=spec["title"], rhs=rhs, jac=spec["jac"],
-                flow_jacobian=flow_jacobian, params=params,
+                flow_jacobian=flow_jacobian, propagate_ens=propagate_ens,
+                propagate_ens_loop=propagate_ens_loop, params=params,
                 n=n, K=spec["K"], J=spec["J"], x0=x0, mu=clim["mu"],
                 B=clim["B"], D=D, m0=m0, P0=P0, observed=observed, H=H, R=R,
                 labels=state_labels(name), propagate=propagate)
