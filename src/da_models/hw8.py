@@ -180,16 +180,35 @@ def scaled_rmse_spread(means, truth, D, covs=None):
 # Model setup
 # ---------------------------------------------------------------------------
 
+def make_maps(rhs, jac, params, dt=DT_OBS, n_sub=N_SUB):
+    """Model maps over one observation window of length dt, HW 1 solver.
+
+    propagate          x -> (n_sub+1, n) model trajectory (truth, EKF mean,
+                       free forecast)
+    flow_jacobian      x -> (n_sub+1, n, n) flow-map Jacobian from the
+                       variational equations (EKF covariance)
+    propagate_ens      E -> (n_sub+1, n, Ne), all members in one stacked
+                       solve_ivp call (EnKF)
+    propagate_ens_loop the same, one solve_ivp call per member
+    Problem 4(c) calls this with dt = 2*DT_OBS and n_sub = 2*N_SUB.
+    """
+    tol = dict(rtol=SOLVER["rtol"], atol=SOLVER["atol"])
+    return dict(
+        propagate=make_propagator(rhs, params, dt, n_sub, **tol),
+        flow_jacobian=make_flow_jacobian(rhs, jac, params, dt, n_sub, **SOLVER),
+        propagate_ens=make_ensemble_propagator(rhs, params, dt, n_sub, **tol),
+        propagate_ens_loop=make_ensemble_propagator(rhs, params, dt, n_sub,
+                                                    vectorized=False, **tol),
+    )
+
+
 def load_model(name, data_dir):
     """Everything about one experiment except the random data.
 
     Returns a dict with rhs, jac (analytic Df), params, x0 (spun-up true
     initial state), the climatology (mu, B), D, the prior (m0, P0), H, R,
-    labels, a propagator for the model map over one observation window
-    (sampled at N_SUB sub-steps), flow_jacobian (its Jacobian from the
-    variational equations), and two ensemble propagators with the same
-    solver settings: propagate_ens (all members in one stacked solve_ivp
-    call) and propagate_ens_loop (one solve_ivp call per member).
+    labels, and the model maps over one observation window DT_OBS (see
+    make_maps): propagate, flow_jacobian, propagate_ens, propagate_ens_loop.
     """
     spec = MODELS[name]
     data_dir = Path(data_dir)
@@ -205,20 +224,11 @@ def load_model(name, data_dir):
     observed = observed_indices(name)
     H = selection_operator(n, observed)
     R = np.eye(len(observed))
-    propagate = make_propagator(rhs, params, DT_OBS, N_SUB,
-                                rtol=SOLVER["rtol"], atol=SOLVER["atol"])
-    flow_jacobian = make_flow_jacobian(rhs, spec["jac"], params, DT_OBS, N_SUB,
-                                       **SOLVER)
-    tol = dict(rtol=SOLVER["rtol"], atol=SOLVER["atol"])
-    propagate_ens = make_ensemble_propagator(rhs, params, DT_OBS, N_SUB, **tol)
-    propagate_ens_loop = make_ensemble_propagator(rhs, params, DT_OBS, N_SUB,
-                                                  vectorized=False, **tol)
     return dict(name=name, title=spec["title"], rhs=rhs, jac=spec["jac"],
-                flow_jacobian=flow_jacobian, propagate_ens=propagate_ens,
-                propagate_ens_loop=propagate_ens_loop, params=params,
-                n=n, K=spec["K"], J=spec["J"], x0=x0, mu=clim["mu"],
-                B=clim["B"], D=D, m0=m0, P0=P0, observed=observed, H=H, R=R,
-                labels=state_labels(name), propagate=propagate)
+                params=params, n=n, K=spec["K"], J=spec["J"], x0=x0,
+                mu=clim["mu"], B=clim["B"], D=D, m0=m0, P0=P0,
+                observed=observed, H=H, R=R, labels=state_labels(name),
+                **make_maps(rhs, spec["jac"], params))
 
 
 # ---------------------------------------------------------------------------
